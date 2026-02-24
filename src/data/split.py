@@ -1,104 +1,68 @@
+import math
 import polars as pl
 from typing import Tuple
 
 from src.config.settings import SplitConfig
 
 
-# ---------------------------------------------------------------------------
-# Train/Test split utilities
-# ---------------------------------------------------------------------------
-
-
 def train_test_split(
     df: pl.DataFrame, config: SplitConfig
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """Split a time‑series dataframe into training and testing portions.
+    """
+    Chronologically split a time-series dataframe into train and test sets.
 
-    The helper performs a series of sanity checks before actually slicing the
-    data:
-
-    * input ``df`` must not be empty
-    * ``date`` column must exist and be of a datetime-like type
-    * values in ``date`` must be strictly increasing (no duplicates or
-      disorder)
-    * either ``config.split_ratio`` **or** ``config.split_date`` must be
-      supplied (validation happens in :class:`SplitConfig`)
-    * resulting train/test sets must both contain at least one row
-
-    The split behaves as follows:
-
-    * when ``split_ratio`` is provided the earliest ``ratio`` portion of the
-      data is returned as the training set; the remainder becomes the test set
-    * when ``split_date`` is provided all rows with ``date <= split_date`` go
-      into the training set and the remainder into the test set
-
-    The function returns ``(train_df, test_df)``.
+    Assumptions
+    ----------
+    - Data is already cleaned and sorted by date by the loader.
+    - 'date' column exists and is datetime.
     """
 
-    # ------------------------------------------------------------------
-    # basic sanity
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
+    # basic validation
+    # --------------------------------------------------
     if df.is_empty():
-        raise ValueError("Input dataframe is empty; nothing to split.")
+        raise ValueError("Input dataframe is empty.")
 
     if "date" not in df.columns:
-        raise ValueError("DataFrame must contain a 'date' column for splitting.")
+        raise ValueError("DataFrame must contain a 'date' column.")
 
-    # make sure we have a comparable dtype (Polars will raise if not)
-    try:
-        ser = df.select(pl.col("date")).to_series()
-    except Exception as exc:  # pragma: no cover - defensive
-        raise ValueError("Unable to access 'date' column: %s" % exc)
-
-    # ------------------------------------------------------------------
-    # ordering / duplicates
-    # ------------------------------------------------------------------
-    # require strictly ascending timestamps
-    if not ser.is_sorted():
-        raise ValueError("'date' column must be sorted in ascending order.")
-
-    if ser.n_unique() != ser.len():
-        raise ValueError("Duplicate timestamps detected in 'date' column.")
-
-    # ------------------------------------------------------------------
-    # perform split
-    # ------------------------------------------------------------------
     n = df.height
 
+    # --------------------------------------------------
+    # ratio based split
+    # --------------------------------------------------
     if config.split_ratio is not None:
-        # ratio case
-        idx = int(n * config.split_ratio)
-        # guard against empty slices
+
+        idx = math.floor(n * config.split_ratio)
+
         if idx <= 0 or idx >= n:
             raise ValueError(
-                "Split ratio %s produces empty train or test set (n=%s)"
-                % (config.split_ratio, n)
+                f"Split ratio {config.split_ratio} produces empty train/test (n={n})"
             )
 
         train = df.slice(0, idx)
-        test = df.slice(idx, n - idx)
+        test = df.slice(idx)
+
+    # --------------------------------------------------
+    # date based split
+    # --------------------------------------------------
     else:
-        # date case
         try:
-            # convert provided string to datetime using polars parser
-            split_val = (
+            split_dt = (
                 pl.Series([config.split_date])
                 .str.strptime(pl.Datetime, strict=True)
                 .item()
             )
         except Exception as exc:
-            raise ValueError(f"split_date could not be parsed: {exc}")
+            raise ValueError(f"Invalid split_date: {exc}")
 
-        train = df.filter(pl.col("date") <= split_val)
-        test = df.filter(pl.col("date") > split_val)
+        train = df.filter(pl.col("date") <= split_dt)
+        test = df.filter(pl.col("date") > split_dt)
 
-    # ------------------------------------------------------------------
-    # metadata checks
-    # ------------------------------------------------------------------
-    if train.is_empty() or test.is_empty():
-        raise ValueError(
-            "Split produced empty dataset: train size %s, test size %s"
-            % (train.height, test.height)
-        )
+        if train.is_empty() or test.is_empty():
+            raise ValueError(
+                f"Split date {config.split_date} results in empty dataset "
+                f"(train={train.height}, test={test.height})"
+            )
 
     return train, test
